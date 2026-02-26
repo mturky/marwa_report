@@ -1,165 +1,288 @@
+"""
+functions.py – Shared utility functions for the CNE Sales Report pipeline.
+
+Contains helpers for:
+  • File system operations (search, list, folder creation, compression)
+  • Logging
+  • Email sending (via Exchange Web Services)
+  • Data-formatting helpers used by other report scripts
+"""
+
 import os
-from datetime import datetime
-import datetime as dtm
-import tarfile
-import shutil
 import gzip
-from exchangelib import Credentials, Account, DELEGATE, HTMLBody,FileAttachment
-from exchangelib import Message, Mailbox,Configuration
+import shutil
+import tarfile
+import datetime as dtm
+from datetime import datetime
+from typing import List, Optional
+
 import pandas as pd
-date =  datetime.now().strftime('%d-%m-%Y')
-base_dir_format = datetime.now().strftime('%d.%m.%y')
-base_dir = f's:\\{base_dir_format}'
+from exchangelib import (
+    Account,
+    Configuration,
+    Credentials,
+    DELEGATE,
+    FileAttachment,
+    HTMLBody,
+    Mailbox,
+    Message,
+)
+
+# ── Module-level constants ──────────────────────────────────────────────────
+DATE_STR = datetime.now().strftime("%d-%m-%Y")
+BASE_DIR_FORMAT = datetime.now().strftime("%d.%m.%y")
+BASE_DIR = f"s:\\{BASE_DIR_FORMAT}"
 
 
+# ── DataFrame helpers ───────────────────────────────────────────────────────
 
-def insert_or_update(df, row_id, new_value):
-    if df['date'].eq(row_id).any():  # Check if row exists
-        df.loc[df['date'] == row_id, 'active'] = new_value  # Update the value
+def insert_or_update(df: pd.DataFrame, row_id, new_value) -> pd.DataFrame:
+    """Insert a new row or update the 'active' column for an existing date.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain columns 'date' and 'active'.
+    row_id : date-like
+        The date value to match or insert.
+    new_value
+        The value to write into the 'active' column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Updated DataFrame (the original is **not** mutated when a new row is
+        added; always use the returned value).
+    """
+    if df["date"].eq(row_id).any():
+        df.loc[df["date"] == row_id, "active"] = new_value
     else:
-        new_row = pd.DataFrame({'date': [row_id], 'active': [new_value]})  # Create new row
-        df = pd.concat([df, new_row], ignore_index=True)  # Append new row
-    
+        new_row = pd.DataFrame({"date": [row_id], "active": [new_value]})
+        df = pd.concat([df, new_row], ignore_index=True)
     return df
 
 
-def compress_files_gzip(file_list, output_filename, compression_ratio):
-    with open(output_filename, 'wb') as output_file:
-        with gzip.GzipFile(fileobj=output_file, compresslevel=compression_ratio) as gzip_file:
-            for file_name in file_list:
-                with open(file_name, 'rb') as input_file:
-                    shutil.copyfileobj(input_file, gzip_file)
+def addInitials(row: pd.Series) -> str:
+    """Prefix an FT number with a document-type abbreviation if it doesn't
+    already contain one (indicated by an underscore in the value).
+
+    Supports: Invoice → INV, Payment → PMT, JV → JV,
+              Debit Note → DN, Credit Note → CN.
+    """
+    ftnr = row["Ftnr"]
+    if "_" in ftnr:
+        return ftnr
+
+    # Map doc-type labels to their short prefixes
+    prefix_map = {
+        "Invoice": "INV",
+        "Payment": "PMT",
+        "JV": "JV",
+        "Debit Note": "DN",
+        "Credit Note": "CN",
+    }
+    doc_type = row["Doc Type_x"]
+    prefix = prefix_map.get(doc_type)
+    return f"{prefix}_{ftnr}" if prefix else ftnr
 
 
-def write_log(message):
-    try:
-        date =  datetime.now().strftime('%d-%m-%Y')
-        with open(date + ' - log.txt', 'a') as file:
-            current_date_time = datetime.now().strftime('[%d.%m.%y-%H:%M:%S] ')
-            file.write(current_date_time + message + '\n')
-            return 'OK'
-        
-    except Exception as e:
-        return e
+# ── File system operations ──────────────────────────────────────────────────
+
+def create_folder_if_not_exists(folder_path: str) -> None:
+    """Create *folder_path* (and any intermediate parents) if it doesn't exist."""
+    os.makedirs(folder_path, exist_ok=True)
 
 
-def addInitials(r):
-    if (('_' in r['Ftnr'])):
-        return r['Ftnr']
-    else:
-        if(r['Doc Type_x']=='Invoice'):
-            return 'INV_'+r['Ftnr']
-        
-        if(r['Doc Type_x']=='Payment'):
-            return 'PMT_'+r['Ftnr']
-        
-        if(r['Doc Type_x']=='JV'):
-            return 'JV_'+r['Ftnr']
-        
-        if(r['Doc Type_x']=='Debit Note'):
-            return 'DN_'+r['Ftnr']
-        
-        if(r['Doc Type_x']=='Credit Note'):
-            return 'CN_'+r['Ftnr']
-        
+def search_files(folder_path: str, file_name: str) -> List[str]:
+    """Recursively walk *folder_path* and return paths whose filename contains
+    *file_name* (case-insensitive match).
+    """
+    file_name_lower = file_name.lower()
+    return [
+        os.path.join(dirpath, fname)
+        for dirpath, _, filenames in os.walk(folder_path)
+        for fname in filenames
+        if file_name_lower in fname.lower()
+    ]
 
 
-def create_folder_if_not_exists(folder_path):
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
-
-
-def compress_files(output_filename,directory,listOfFiles):
-    # List all files in the directory
-    
-    # Create a tar.gz archive using tarfile with custom compression options
-    with tarfile.open(output_filename, "w:gz", compresslevel=9) as tar:
-        for file in listOfFiles:
-            file_path = os.path.join(directory, file)
-            tar.add(file_path)
-
-
-
-def search_files(folder_path, file_name):
-    # write_log(f'[Search Method] {folder_path} , {file_name}')
-    found_files = []
-    for foldername, subfolders, filenames in os.walk(folder_path):
-        for filename in filenames:
-            # write_log(f'[Search] {filename}')
-            if file_name.lower() in filename.lower():
-                found_files.append(os.path.join(foldername, filename))
-
-    return found_files
-
-
-def list_files(directory):
+def list_files(directory: str) -> List[str]:
+    """Return the names of all items in *directory*."""
     return os.listdir(directory)
 
 
-def checkModificationDate(file):
-    creation_time = os.path.getmtime(file)
-    creation_date = dtm.datetime.fromtimestamp(creation_time)
-    today = dtm.datetime.now().date()
-    return creation_date.date() == today
+def checkModificationDate(filepath: str) -> bool:
+    """Return ``True`` if *filepath* was last modified today."""
+    mod_time = os.path.getmtime(filepath)
+    mod_date = dtm.datetime.fromtimestamp(mod_time).date()
+    return mod_date == dtm.datetime.now().date()
 
 
-def sendMail(subject,body,to='mturky@cne.com.eg',cc=None,attachments=None,username='mturky',password='m0h@mmed'):
-    
+def getModificationDate(filepath: str) -> float:
+    """Return the modification timestamp (epoch seconds) of *filepath*."""
+    return os.path.getmtime(filepath)
+
+
+# ── Compression ─────────────────────────────────────────────────────────────
+
+def compress_files_gzip(
+    file_list: List[str],
+    output_filename: str,
+    compression_ratio: int,
+) -> None:
+    """Concatenate all files in *file_list* into a single gzip archive."""
+    with open(output_filename, "wb") as out_f:
+        with gzip.GzipFile(fileobj=out_f, compresslevel=compression_ratio) as gz:
+            for file_name in file_list:
+                with open(file_name, "rb") as in_f:
+                    shutil.copyfileobj(in_f, gz)
+
+
+def compress_files(
+    output_filename: str,
+    directory: str,
+    file_list: List[str],
+) -> None:
+    """Create a *.tar.gz* archive from files in *directory* at maximum compression."""
+    with tarfile.open(output_filename, "w:gz", compresslevel=9) as tar:
+        for file_name in file_list:
+            tar.add(os.path.join(directory, file_name))
+
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+
+def write_log(message: str) -> str:
+    """Append a timestamped *message* to today's log file.
+
+    Returns ``'OK'`` on success, or the exception string on failure.
+    """
+    try:
+        log_date = datetime.now().strftime("%d-%m-%Y")
+        timestamp = datetime.now().strftime("[%d.%m.%y-%H:%M:%S] ")
+        with open(f"{log_date} - log.txt", "a") as f:
+            f.write(f"{timestamp}{message}\n")
+        return "OK"
+    except Exception as exc:
+        return str(exc)
+
+
+# ── Email ───────────────────────────────────────────────────────────────────
+
+def sendMail(
+    subject: str,
+    body: str,
+    to: str = "mturky@cne.com.eg",
+    cc: Optional[List[str]] = None,
+    attachments: Optional[List[str]] = None,
+    username: str = "mturky",
+    password: str = "m0h@mmed",
+) -> None:
+    """Send an email via Exchange Web Services.
+
+    Parameters
+    ----------
+    subject : str
+        Email subject (prefixed automatically with ``[Auto]``).
+    body : str
+        HTML body content.
+    to : str
+        Primary recipient address.
+    cc : list[str] | None
+        Carbon-copy recipients.
+    attachments : list[str] | None
+        File paths to attach.
+    """
     credentials = Credentials(username=username, password=password)
     config = Configuration(server="mail.cne.com.eg", credentials=credentials)
-    myaccount = Account(primary_smtp_address='mturky@cne.com.eg',credentials = credentials, config=config)
+    account = Account(
+        primary_smtp_address="mturky@cne.com.eg",
+        credentials=credentials,
+        config=config,
+    )
 
-    m = Message(
-        account=myaccount,
-        subject=f'[Auto] {subject}',
-        body=HTMLBody( body),
+    msg = Message(
+        account=account,
+        subject=f"[Auto] {subject}",
+        body=HTMLBody(body),
         to_recipients=[to],
-        cc_recipients=cc,
-        bcc_recipients=[]
+        cc_recipients=cc or [],
+        bcc_recipients=[],
     )
 
     if attachments:
+        for file_path in attachments:
+            with open(file_path, "rb") as f:
+                att = FileAttachment(
+                    name=file_path,
+                    content_type="image/png",
+                    is_inline=False,
+                    is_contact_photo=False,
+                    content=f.read(),
+                )
+            msg.attach(att)
 
-        for a in attachments:
-            att = FileAttachment(
-            name=f'{a}',
-            content_type="image/png",
-            is_inline=False,
-            is_contact_photo=False,
-            content=open(f'{a}', "rb").read())
-            m.attach(att)
-    m.send()
-
-
-
-
-
-def getModificationDate(file):
-    return os.path.getmtime(file)
+    msg.send()
 
 
-def createDTHfile(beinfile,dth_file_name):
-        
-        df = pd.read_csv(beinfile,dtype='str')
+# ── DTH report helper ──────────────────────────────────────────────────────
 
-        
-        #------------------------ create DTH file
+def createDTHfile(beinfile: str, dth_file_name: str) -> None:
+    """Generate a DTH (Direct-To-Home) subscriber CSV from a BeinData export.
 
-        dth_sub_types = ['beIN Quartar Installment', 'CNE Subscriber', 'MCE staff (CNE staff)',
-                        'BeIN sports CC', 'beIN Bi Installment', 'Corporate Subscriber', 'Temp',
-                        'Bein NC', 'Bulk DTH customer', 'beIN Installment Sub', 'Charge Back']
-        plans_to_exclude = ['AFCON23ADDNov','EURO24ADDNov','AFC23-ADD-Nov','AFCON23-SA-Nov','AFC23-SA-Nov','EURO24SANov','Temp01']
-        dth = df.loc[df['Status']=='Active']
-        dth = dth.loc[dth['Customer Type'].isin(dth_sub_types)]
-        dth = dth.loc[~dth['Plan'].isin(plans_to_exclude)]
-        dth['End Date'] = pd.to_datetime(dth['End Date'])
-        dth = dth.sort_values(['Customer Number','End Date'],ascending=False)
-        dth = dth.drop_duplicates(subset=['Customer Number'],keep='first')
-        dth = dth.loc[:,['Customer Number',
-        'Customer Type',
-        'Plan',
-        'Decoder',
-        'Item Description STB',
-        'Smart Card',
-        'Item Description SC']]
-        dth.to_csv(f'{base_dir}/{date} {dth_file_name}.csv',index=False)
+    Filters for active subscriptions of recognised customer types, excludes
+    promotional plans, and keeps only the most recent contract per customer.
+    """
+    df = pd.read_csv(beinfile, dtype="str")
+
+    # Customer types that qualify as DTH subscribers
+    DTH_SUB_TYPES = [
+        "beIN Quartar Installment",
+        "CNE Subscriber",
+        "MCE staff (CNE staff)",
+        "BeIN sports CC",
+        "beIN Bi Installment",
+        "Corporate Subscriber",
+        "Temp",
+        "Bein NC",
+        "Bulk DTH customer",
+        "beIN Installment Sub",
+        "Charge Back",
+    ]
+
+    # Promotional / temporary plans to exclude
+    PLANS_TO_EXCLUDE = [
+        "AFCON23ADDNov",
+        "EURO24ADDNov",
+        "AFC23-ADD-Nov",
+        "AFCON23-SA-Nov",
+        "AFC23-SA-Nov",
+        "EURO24SANov",
+        "Temp01",
+    ]
+
+    # Filter & deduplicate
+    dth = df.loc[
+        (df["Status"] == "Active")
+        & df["Customer Type"].isin(DTH_SUB_TYPES)
+        & ~df["Plan"].isin(PLANS_TO_EXCLUDE)
+    ].copy()
+
+    dth["End Date"] = pd.to_datetime(dth["End Date"])
+    dth = (
+        dth.sort_values(["Customer Number", "End Date"], ascending=False)
+        .drop_duplicates(subset=["Customer Number"], keep="first")
+    )
+
+    # Select output columns
+    output_cols = [
+        "Customer Number",
+        "Customer Type",
+        "Plan",
+        "Decoder",
+        "Item Description STB",
+        "Smart Card",
+        "Item Description SC",
+    ]
+    dth[output_cols].to_csv(
+        f"{BASE_DIR}/{DATE_STR} {dth_file_name}.csv", index=False
+    )
