@@ -14,7 +14,7 @@ import shutil
 import tarfile
 import datetime as dtm
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional,Union
 
 import pandas as pd
 from exchangelib import (
@@ -27,6 +27,8 @@ from exchangelib import (
     Mailbox,
     Message,
 )
+
+
 
 # ── Module-level constants ──────────────────────────────────────────────────
 DATE_STR = datetime.now().strftime("%d-%m-%Y")
@@ -168,58 +170,56 @@ def write_log(message: str) -> str:
 
 # ── Email ───────────────────────────────────────────────────────────────────
 
+
+def _to_mailboxes(addresses: Union[str, List[str]]) -> List[Mailbox]:
+    """Normalize string or list[str] into Mailbox objects."""
+    if isinstance(addresses, str):
+        addresses = [addresses]
+    return [Mailbox(email_address=addr) for addr in addresses]
+
 def sendMail(
     subject: str,
     body: str,
-    to: str = "mturky@cne.com.eg",
+    to: Union[str, List[str]] = "mturky@cne.com.eg",
     cc: Optional[List[str]] = None,
     attachments: Optional[List[str]] = None,
     username: str = "mturky",
     password: str = "m0h@mmed",
 ) -> None:
-    """Send an email via Exchange Web Services.
+    """Send an email via Exchange Web Services."""
 
-    Parameters
-    ----------
-    subject : str
-        Email subject (prefixed automatically with ``[Auto]``).
-    body : str
-        HTML body content.
-    to : str
-        Primary recipient address.
-    cc : list[str] | None
-        Carbon-copy recipients.
-    attachments : list[str] | None
-        File paths to attach.
-    """
     credentials = Credentials(username=username, password=password)
-    config = Configuration(server="mail.cne.com.eg", credentials=credentials)
+
+    config = Configuration(
+        server="mail.cne.com.eg",
+        credentials=credentials,
+    )
+
     account = Account(
         primary_smtp_address="mturky@cne.com.eg",
         credentials=credentials,
         config=config,
+        autodiscover=False,
     )
 
     msg = Message(
         account=account,
         subject=f"[Auto] {subject}",
         body=HTMLBody(body),
-        to_recipients=[to],
-        cc_recipients=cc or [],
+        to_recipients=_to_mailboxes(to),
+        cc_recipients=_to_mailboxes(cc) if cc else [],
         bcc_recipients=[],
     )
 
     if attachments:
         for file_path in attachments:
             with open(file_path, "rb") as f:
-                att = FileAttachment(
-                    name=file_path,
-                    content_type="image/png",
-                    is_inline=False,
-                    is_contact_photo=False,
-                    content=f.read(),
+                msg.attach(
+                    FileAttachment(
+                        name=file_path.split("/")[-1],
+                        content=f.read(),
+                    )
                 )
-            msg.attach(att)
 
     msg.send()
 
