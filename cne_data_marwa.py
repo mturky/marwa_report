@@ -86,6 +86,7 @@ if missing_files:
     print(f'ERROR: {error_msg}')
     sendMail(
         subject='CNE Report - Missing Source Files',
+        cc=['nwagih@cne.com.eg','dsabry@cne.com.eg'],
         body=f'<p>The CNE Sales Report could not be generated.<br><br><b>Missing files:</b></p><ul>' +
              ''.join(f'<li>{f}</li>' for f in missing_files) +
              f'</ul><p>Search directory: <code>{base_dir}</code></p>',
